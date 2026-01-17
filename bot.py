@@ -40,7 +40,7 @@ A_STAR_OUR_TILE_COST = 0
 A_STAR_EMPTY_TILE_COST = 1
 A_STAR_NUTRIENTS_DIVISOR = 4  # Reduces nutrients impact (divide by this value)
 A_STAR_BIOMASS_MULTIPLIER = 1  # Multiplies biomass cost impact
-A_STAR_ALLIED_SPORE_PENALTY = 20  # Cost penalty for tiles with our spores (avoid them)
+A_STAR_ALLIED_SPORE_PENALTY = 1  # Cost penalty for tiles with our spores (avoid them)
 
 class Bot:
     def __init__(self):
@@ -67,15 +67,15 @@ class Bot:
 
         self.assign_spore_role()
 
-        if(self.nutrient_per_turn() > 0 or self.state.world.teamInfos[self.state.yourTeamId].nextSpawnerCost == 0):
+        if(self.nutrient_per_turn() > (len(self.ourSpawners()) * len(self.ourSpawners()) * 2) or self.state.world.teamInfos[self.state.yourTeamId].nextSpawnerCost == 0 ):
             self.actions += self.decision_spawner(game_message)
-        print("SCOUTS : ", self.Spore_roles[SCOUT])
+        # print("SCOUTS : ", self.Spore_roles[SCOUT])
             
         self.actions += self.sporeMovementActions()
         self.actions += self.create_spore(game_message)
         self.actions += self.defender_target_assignment()
         self.actions += self.attacker_target_assignment()
-        print(self.actions)
+        # print(self.actions)
 
         ########################################################
         # to be removed
@@ -103,7 +103,7 @@ class Bot:
     def sporeMovementActions(self) -> list[SporeMoveToAction]:
         print("heere")
         possibleTargets: list[list[int]] = self.getTargets()
-
+        
         # print(f">>> Possible targets:\n{possibleTargets}")
 
         wantedTargets: dict[str, (Position, Position)] = self.scout_target_assignement(possibleTargets)
@@ -135,25 +135,27 @@ class Bot:
         actions: list[SporeMoveToAction] = []
         spores = self.Spore_roles[ATTACKER]
         ennemySpawners = self.ennemySpawners()
+        nutrients = self.coolNutrients()
 
         # print(f">>> getting targets on grid:\n{grid}")
 
         for i in range(width):
             for j in range(height):
-                malus = self.deltaBase(Position(i, j))
+                malus = self.deltaBase(Position(i, j)) * 2
                 targets[i][j] -= malus
+                if nutrients[i][j] > 0:
+                    targets[i][j] += NUTRIENTS_FLAT_RATING
                 if Position(i, j) in ennemySpawners:
                     targets[i][j] += ENNEMY_SPAWNER_PRIORITY_BONUS
                 if grid[i][j] == us:
                     targets[i][j] = PRIORITY_DONT_TOUCH
 
+        best: Position = Position(0, 0)
+        for i in range(width):
+            for j in range(height):
+                if targets[i][j] > targets[best.x][best.y]:
+                    best = Position(i, j)
         for spore in spores:
-            best: Position = Position(0, 0)
-            for i in range(width):
-                for j in range(height):
-                    if targets[i][j] > targets[best.x][best.y]:
-                        best = Position(i, j)
-            targets[best.x][best.y] = PRIORITY_DONT_TOUCH
             path = self.a_star_pathfinding(spore.position, best)
             action = SporeMoveToAction(spore.id, path[1])
             actions.append(action)
@@ -255,7 +257,7 @@ class Bot:
                     if (0 <= pos.x < self.state.world.map.width) and (0 <= pos.y < self.state.world.map.height):
                         # print("  Position ", pos, " has target value ", targetTiles[pos.x][pos.y])
                         if (targetTiles[pos.x][pos.y] > PRIORITY_DONT_TOUCH
-                        and (pos.x, pos.y) not in assigned_tiles 
+                        # and (pos.x, pos.y) not in assigned_tiles 
                         and (best_tile is None or self.tile_rating(targetTiles, Position(pos.x, pos.y), spore_pos) > self.tile_rating(targetTiles, best_tile, spore_pos))):
                             best_tile = Position(x = pos.x, y = pos.y)
                     
@@ -490,6 +492,7 @@ class Bot:
             return PRIORITY_DONT_TOUCH
         # return targets[tile_pos.x][tile_pos.y]
         return targets[tile_pos.x][tile_pos.y] - (distance * DISTANCE_COEFF_FOR_TILE_RATING)
+        # return targets[tile_pos.x][tile_pos.y] - self.a_star_pathfinding(spore_pos, tile_pos).__len__() * DISTANCE_COEFF_FOR_TILE_RATING
     
     def assign_spore_role(self):
         my_team: TeamInfo = self.state.world.teamInfos[self.state.yourTeamId]
