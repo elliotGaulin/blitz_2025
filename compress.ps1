@@ -1,6 +1,6 @@
 $compress = @{
   Path = ".\*.py", ".\requirements.txt"
   CompressionLevel = "Fastest"
-  DestinationPath = ".\bot.zip"
+  DestinationPath = ".\bot_v5.zip"
 }
 Compress-Archive @compress
