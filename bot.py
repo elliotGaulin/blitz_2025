@@ -12,8 +12,10 @@ MAX_DISTANCE_FOR_TARGET = 40
 BASE_TARGET_PRIORITY = 9999
 PRIORITY_DONT_TOUCH = -1
 DISTANCE_COEFF_FOR_TILE_RATING = 5
-NUTRIENTS_RATING = 100
+NUTRIENTS_RATING = 80
 DISTANCE_MALUS_COEFFICIENT = 5
+DEFENDER_DISTANCE_MALUS_COEFFICIENT = 20
+BIOMASS_MALUS_COEFFICIENT = 2
 
 NUTRIMENT_NEXT_GENERATOR = 30
 GENERATOR_NEXT = 10
@@ -28,9 +30,13 @@ BIOMASS_ATTACKER = 4
 BIOMASS_DEFFENDER = 7
 BIOMASS_GENERATOR = 1
 
+# A* Pathfinding cost factors
+A_STAR_OUR_TILE_COST = 0
+A_STAR_EMPTY_TILE_COST = 1
+A_STAR_NUTRIENTS_DIVISOR = 4  # Reduces nutrients impact (divide by this value)
+A_STAR_BIOMASS_MULTIPLIER = 1  # Multiplies biomass cost impact
+
 class Bot:
-
-
     def __init__(self):
         self.state: TeamGameState = None
         self.biomass_to_spawner = BIOMASSE_MAX_TO_SPAWNER
@@ -81,31 +87,71 @@ class Bot:
         return self.actions
 
     def sporeMovementActions(self) -> list[SporeMoveToAction]:
+        print("heere")
         possibleTargets: list[list[int]] = self.getTargets()
 
         # print(f">>> Possible targets:\n{possibleTargets}")
 
-        wantedTargets: dict[str, Position] = self.target_assignement(possibleTargets)
+        wantedTargets: dict[str, (Position, Position)] = self.scout_target_assignement(possibleTargets)
         
-        print(f">>> Wanted targets:\n{wantedTargets}")
+        # print(f">>> Wanted targets:\n{wantedTargets}")
         
         actions: list[SporeMoveToAction] = []
 
         for spore in wantedTargets:
-            action = SporeMoveToAction(spore, wantedTargets[spore])
+            path = self.a_star_pathfinding(wantedTargets[spore][0], wantedTargets[spore][1])
+            # print(" Spore ", spore, " path for pos ", wantedTargets[spore][0], " to ", wantedTargets[spore][1], ":")
+            # for pos in path:
+            #     print("  ", pos)
+            action = SporeMoveToAction(spore, path[1])
             actions.append(action)
 
-        print(f">>> MoveToActions:\n   ")
+        # print(f">>> MoveToActions:\n   ")
 
         return actions
 
-    def target_assignement(self, targetTiles: list[list[int]]) -> dict[str, Position]:
+    def defender_target_assignement(self) -> list[SporeMoveToAction]:
+        grid = self.state.world.ownershipGrid
+        width = self.state.world.map.width
+        height = self.state.world.map.height
+        us = self.state.yourTeamId
+        targets: list[list[int]] = [
+            [BASE_TARGET_PRIORITY] * width for _ in range(height)
+        ]
+        actions: list[SporeMoveToAction] = []
+        spores = self.Spore_roles[DEFENDER].copy()
+
+        print(f">>> getting targets on grid:\n{grid}")
+
+        for i in range(width):
+            for j in range(height):
+                malus = (
+                    self.deltaBase(Position(i, j)) * DEFENDER_DISTANCE_MALUS_COEFFICIENT
+                )
+                targets[i][j] -= malus
+                if grid[i][j] == us:
+                    targets[i][j] = PRIORITY_DONT_TOUCH
+
+        for spore in spores:
+            best: Position = Position(0, 0)
+            for i in range(width):
+                for j in range(height):
+                    if targets[i][j] > targets[best.x][best.y]:
+                        best = Position(i, j)
+            targets[best.x][best.y] = PRIORITY_DONT_TOUCH
+            action = SporeMoveToAction(spore.id, best)
+            actions.append(action)
+
+        return actions
+
+    def scout_target_assignement(self, targetTiles: list[list[int]]) -> dict[str, (Position, Position)]:
         # print("<<< Target tiles:")
         # for row in targetTiles:
         #     print(row)
-        print(">>> Target assignment")
+        # print(">>> Target assignment")
+        # spores = self.Spore_roles[SCOUT]
         spores = self.state.world.teamInfos[self.state.yourTeamId].spores
-        assignments: dict[str, Position] = {}
+        assignments: dict[str, (Position, Position)] = {}
         assigned_tiles: set[Position] = set()
 
         for spore in spores:
@@ -118,8 +164,8 @@ class Bot:
             #         break
             if spore_already_has_action:
                 continue
-            print("Assigning target for spore ", spore.id)
-            print("spore pos: ", spore.position)
+            # print("Assigning target for spore ", spore.id)
+            # print("spore pos: ", spore.position)
             best_tile = None
 
             distance = 1
@@ -209,7 +255,7 @@ class Bot:
                     print(" No target found within max distance")
                     break
             if best_tile:
-                assignments[spore.id] = best_tile
+                assignments[spore.id] = (spore_pos, best_tile)
                 assigned_tiles.add((best_tile.x, best_tile.y))
 
         print("<<< Target assignment")
@@ -225,7 +271,7 @@ class Bot:
             [BASE_TARGET_PRIORITY] * width for _ in range(height)
         ]
 
-        print(f">>> getting targets on grid:\n{grid}")
+        # print(f">>> getting targets on grid:\n{grid}")
 
         for i in range(width):
             for j in range(height):
@@ -246,7 +292,7 @@ class Bot:
         malus = 0
 
         if grid[i][j] != us:
-            malus = biomassGrid[i][j] + (
+            malus = (biomassGrid[i][j] * BIOMASS_MALUS_COEFFICIENT) + (
                 self.deltaBase(Position(i, j)) * DISTANCE_MALUS_COEFFICIENT
             )
 
@@ -388,3 +434,108 @@ class Bot:
             
             elif(spore.biomass < BIOMASS_GENERATOR):
                 self.Spore_roles[GENERATOR].append(spore)
+    
+    def a_star_pathfinding(self, start: Position, goal: Position) -> list[Position]:
+        """
+        A* pathfinding algorithm to find optimal path from start to goal.
+        Cost factors:
+        - Base cost: 1 per tile moved
+        - Movement cost: 0 for our tiles, 1 for empty, biomass for opponent tiles
+        - Nutrients: reduce cost slightly (bonus)
+        """
+        from heapq import heappush, heappop
+        
+        width = self.state.world.map.width
+        height = self.state.world.map.height
+        us = self.state.yourTeamId
+        
+        def heuristic(pos: Position) -> int:
+            """Manhattan distance heuristic"""
+            return abs(pos.x - goal.x) + abs(pos.y - goal.y)
+        
+        def get_movement_cost(pos: Position) -> int:
+            """
+            Get the cost to enter a tile.
+            Our tiles: 0
+            Empty tiles (not owned by anyone): 1
+            Other tiles: biomass on that tile
+            Nutrients provide a small bonus
+            """
+            ownership = self.state.world.ownershipGrid[pos.x][pos.y]
+            biomass = self.state.world.biomassGrid[pos.x][pos.y]
+            nutrients = self.state.world.map.nutrientGrid[pos.x][pos.y]
+            
+            # Our tiles have no movement cost
+            if ownership == us:
+                cost = A_STAR_OUR_TILE_COST
+            # Empty/neutral tiles cost 1
+            elif ownership is None or ownership == "":
+                cost = A_STAR_EMPTY_TILE_COST
+            # Other team's tiles cost equal to biomass
+            else:
+                cost = biomass * A_STAR_BIOMASS_MULTIPLIER
+            
+            # Nutrients provide a small bonus (reduce cost)
+            if nutrients > 0:
+                cost = max(0, cost - nutrients // A_STAR_NUTRIENTS_DIVISOR)
+            
+            return cost
+        
+        # Open set: heap of (f_score, counter, position)
+        open_set = [(0, 0, start)]
+        counter = 1
+        
+        # Closed set: visited nodes
+        closed_set = set()
+        
+        # For path reconstruction
+        came_from = {}
+        
+        # g_score: actual cost from start to each node
+        g_score = {(start.x, start.y): 0}
+        
+        while open_set:
+            _, _, current = heappop(open_set)
+            
+            # Goal reached
+            if current.x == goal.x and current.y == goal.y:
+                # Reconstruct path
+                path = []
+                pos = (current.x, current.y)
+                while pos in came_from:
+                    path.append(Position(pos[0], pos[1]))
+                    pos = came_from[pos]
+                path.append(start)
+                return path[::-1]
+            
+            closed_set.add((current.x, current.y))
+            
+            # Check all 4 neighbors (up, down, left, right - no diagonals)
+            neighbors = [
+                Position(current.x + 1, current.y),
+                Position(current.x - 1, current.y),
+                Position(current.x, current.y + 1),
+                Position(current.x, current.y - 1),
+            ]
+            
+            for neighbor in neighbors:
+                # Check bounds
+                if not (0 <= neighbor.x < width and 0 <= neighbor.y < height):
+                    continue
+                
+                if (neighbor.x, neighbor.y) in closed_set:
+                    continue
+                
+                # Calculate tentative g_score
+                tentative_g = g_score[(current.x, current.y)] + get_movement_cost(neighbor)
+                
+                # If this is a better path, update it
+                if (neighbor.x, neighbor.y) not in g_score or tentative_g < g_score[(neighbor.x, neighbor.y)]:
+                    came_from[(neighbor.x, neighbor.y)] = (current.x, current.y)
+                    g_score[(neighbor.x, neighbor.y)] = tentative_g
+                    f_score = tentative_g + heuristic(neighbor)
+                    heappush(open_set, (f_score, counter, neighbor))
+                    counter += 1
+        
+        # No path found, return empty list
+        return []
