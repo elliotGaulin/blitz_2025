@@ -6,16 +6,19 @@ NUTRIENTS_MIN_TO_SPORE = 5
 BIOMASS_FOR_SPORE = 4
 SPORE_AMOUNT_FOR_PROTECTOR = 10
 SPORE_AMOUNT_FOR_BIG_PROTECTOR = 20
-SPORE_SMALL_PROTECTOR = 15 
-SPORE_BIG_PROTECTOR = 30 
+SPORE_ATTACKER = 15 
+SPORE_BIG_PROTECTOR = 20 
 MAX_DISTANCE_FOR_TARGET = 40
 BASE_TARGET_PRIORITY = 9999
 PRIORITY_DONT_TOUCH = -1
 DISTANCE_COEFF_FOR_TILE_RATING = 5
-NUTRIENTS_RATING = 80
-DISTANCE_MALUS_COEFFICIENT = 5
+NUTRIENTS_RATING = 50
+NUTRIENTS_FLAT_RATING = 100
+DISTANCE_MALUS_COEFFICIENT = 2
 DEFENDER_DISTANCE_MALUS_COEFFICIENT = 20
-BIOMASS_MALUS_COEFFICIENT = 2
+BIOMASS_MALUS_COEFFICIENT = 5
+ENNEMY_SPAWNER_PRIORITY_BONUS = 100
+DEFENDER_BIOMASS_MALUS_COEFFICIENT = 10
 
 NUTRIMENT_NEXT_GENERATOR = 30
 GENERATOR_NEXT = 10
@@ -25,16 +28,19 @@ ATTACKER = "Attacker"
 SCOUT = "Scout"
 GENERATOR = "Generator"
 
-BIOMASS_SCOUT = 2
-BIOMASS_ATTACKER = 4
-BIOMASS_DEFFENDER = 7
+BIOMASS_SCOUT = BIOMASS_FOR_SPORE
+BIOMASS_ATTACKER = SPORE_ATTACKER
+BIOMASS_DEFFENDER = SPORE_BIG_PROTECTOR
 BIOMASS_GENERATOR = 1
+
+MIN_SCOUT_AMOUNT = 5
 
 # A* Pathfinding cost factors
 A_STAR_OUR_TILE_COST = 0
 A_STAR_EMPTY_TILE_COST = 1
 A_STAR_NUTRIENTS_DIVISOR = 4  # Reduces nutrients impact (divide by this value)
 A_STAR_BIOMASS_MULTIPLIER = 1  # Multiplies biomass cost impact
+A_STAR_ALLIED_SPORE_PENALTY = 20  # Cost penalty for tiles with our spores (avoid them)
 
 class Bot:
     def __init__(self):
@@ -46,6 +52,7 @@ class Bot:
             SCOUT    : [],
             GENERATOR: []
         }
+        self.last_produce = SCOUT
 
         print("Initializing your super mega duper bot")
 
@@ -58,10 +65,17 @@ class Bot:
 
         print(self.state.lastTickErrors)
 
+        self.assign_spore_role()
 
-        self.actions += self.decision_spawner(game_message)
+        if(self.nutrient_per_turn() > 0 or self.state.world.teamInfos[self.state.yourTeamId].nextSpawnerCost == 0):
+            self.actions += self.decision_spawner(game_message)
+        print("SCOUTS : ", self.Spore_roles[SCOUT])
+            
         self.actions += self.sporeMovementActions()
         self.actions += self.create_spore(game_message)
+        self.actions += self.defender_target_assignment()
+        self.actions += self.attacker_target_assignment()
+        print(self.actions)
 
         ########################################################
         # to be removed
@@ -110,7 +124,7 @@ class Bot:
 
         return actions
 
-    def defender_target_assignement(self) -> list[SporeMoveToAction]:
+    def attacker_target_assignment(self) -> list[SporeMoveToAction]:
         grid = self.state.world.ownershipGrid
         width = self.state.world.map.width
         height = self.state.world.map.height
@@ -119,15 +133,52 @@ class Bot:
             [BASE_TARGET_PRIORITY] * width for _ in range(height)
         ]
         actions: list[SporeMoveToAction] = []
-        spores = self.Spore_roles[DEFENDER].copy()
+        spores = self.Spore_roles[ATTACKER]
+        ennemySpawners = self.ennemySpawners()
 
-        print(f">>> getting targets on grid:\n{grid}")
+        # print(f">>> getting targets on grid:\n{grid}")
+
+        for i in range(width):
+            for j in range(height):
+                malus = self.deltaBase(Position(i, j))
+                targets[i][j] -= malus
+                if Position(i, j) in ennemySpawners:
+                    targets[i][j] += ENNEMY_SPAWNER_PRIORITY_BONUS
+                if grid[i][j] == us:
+                    targets[i][j] = PRIORITY_DONT_TOUCH
+
+        for spore in spores:
+            best: Position = Position(0, 0)
+            for i in range(width):
+                for j in range(height):
+                    if targets[i][j] > targets[best.x][best.y]:
+                        best = Position(i, j)
+            targets[best.x][best.y] = PRIORITY_DONT_TOUCH
+            path = self.a_star_pathfinding(spore.position, best)
+            action = SporeMoveToAction(spore.id, path[1])
+            actions.append(action)
+
+        return actions
+
+    def defender_target_assignment(self) -> list[SporeMoveToAction]:
+        grid = self.state.world.ownershipGrid
+        width = self.state.world.map.width
+        height = self.state.world.map.height
+        biomassGrid = self.state.world.biomassGrid
+        us = self.state.yourTeamId
+        targets: list[list[int]] = [
+            [BASE_TARGET_PRIORITY] * width for _ in range(height)
+        ]
+        actions: list[SporeMoveToAction] = []
+        spores = self.Spore_roles[DEFENDER]
+
+        # print(f">>> getting targets on grid:\n{grid}")
 
         for i in range(width):
             for j in range(height):
                 malus = (
                     self.deltaBase(Position(i, j)) * DEFENDER_DISTANCE_MALUS_COEFFICIENT
-                )
+                ) + (biomassGrid[i][j] * DEFENDER_BIOMASS_MALUS_COEFFICIENT)
                 targets[i][j] -= malus
                 if grid[i][j] == us:
                     targets[i][j] = PRIORITY_DONT_TOUCH
@@ -149,9 +200,9 @@ class Bot:
         # for row in targetTiles:
         #     print(row)
         # print(">>> Target assignment")
-        # spores = self.Spore_roles[SCOUT]
-        spores = self.state.world.teamInfos[self.state.yourTeamId].spores
-        assignments: dict[str, (Position, Position)] = {}
+        spores = self.Spore_roles[SCOUT]
+        # spores = self.state.world.teamInfos[self.state.yourTeamId].spores
+        assignments: dict[str, tuple[Position, Position]] = {}
         assigned_tiles: set[Position] = set()
 
         for spore in spores:
@@ -308,6 +359,17 @@ class Bot:
 
         return ourSpawners
 
+    def ennemySpawners(self) -> list[Spawner]:
+        us = self.state.yourTeamId
+        theirSpawners: list[Spawner] = []
+
+        for spawner in self.state.world.spawners:
+            if spawner.teamId != us:
+                theirSpawners.append(spawner)
+
+        return theirSpawners
+
+
     def baseCenter(self, position: Position) -> Position:
         totalPos: Position = Position(0, 0)
         ourSpawners = self.ourSpawners()
@@ -356,8 +418,9 @@ class Bot:
 
         for i in range(width):
             for j in range(height):
-                bonusRating[i][j] = nutrients[i][j] * NUTRIENTS_RATING
-
+                n = nutrients[i][j]
+                if n > 0:
+                    bonusRating[i][j] = (n * NUTRIENTS_RATING) + NUTRIENTS_FLAT_RATING
         return bonusRating
 
     def check_spawner_positions(self, game_state: TeamGameState, spore):
@@ -404,11 +467,20 @@ class Bot:
         actions = []
         my_team: TeamInfo = game_state.world.teamInfos[game_state.yourTeamId]
         spore_amount = len(my_team.spores)
+        scout_amount = len(self.Spore_roles[SCOUT])
 
-        if(spore_amount > SPORE_AMOUNT_FOR_BIG_PROTECTOR):
+        if(scout_amount < MIN_SCOUT_AMOUNT):
+            return  BIOMASS_FOR_SPORE
+        
+        if(self.last_produce == SCOUT):
+            self.last_produce = DEFENDER
             return SPORE_BIG_PROTECTOR
-        elif(spore_amount > SPORE_AMOUNT_FOR_PROTECTOR):
-            return SPORE_SMALL_PROTECTOR
+        if(self.last_produce == DEFENDER):
+            self.last_produce = ATTACKER
+            return SPORE_ATTACKER
+        if(self.last_produce == ATTACKER):
+            self.last_produce = SCOUT
+            return BIOMASS_FOR_SPORE
         
         return  BIOMASS_FOR_SPORE
     
@@ -444,7 +516,6 @@ class Bot:
         - Nutrients: reduce cost slightly (bonus)
         """
         from heapq import heappush, heappop
-        
         width = self.state.world.map.width
         height = self.state.world.map.height
         us = self.state.yourTeamId
@@ -460,6 +531,7 @@ class Bot:
             Empty tiles (not owned by anyone): 1
             Other tiles: biomass on that tile
             Nutrients provide a small bonus
+            Allied spores: penalty to avoid them
             """
             ownership = self.state.world.ownershipGrid[pos.x][pos.y]
             biomass = self.state.world.biomassGrid[pos.x][pos.y]
@@ -478,6 +550,13 @@ class Bot:
             # Nutrients provide a small bonus (reduce cost)
             if nutrients > 0:
                 cost = max(0, cost - nutrients // A_STAR_NUTRIENTS_DIVISOR)
+            
+            # Add penalty if any of our spores are on this tile (avoid them)
+            my_team: TeamInfo = self.state.world.teamInfos[us]
+            for spore in my_team.spores:
+                if spore.position.x == pos.x and spore.position.y == pos.y:
+                    cost += A_STAR_ALLIED_SPORE_PENALTY
+                    break
             
             return cost
         
@@ -539,3 +618,103 @@ class Bot:
         
         # No path found, return empty list
         return []
+
+
+    def assign_spore_role(self):
+        my_team: TeamInfo = self.state.world.teamInfos[self.state.yourTeamId]
+
+        # Remove dead/missing spores
+        self.cleanup_missing_spores(my_team)
+
+        for spore in my_team.spores:
+
+            # Skip if already assigned
+            if self.is_spore_already_assigned(spore):
+                print(f"[SKIP] Spore {spore.id} already assigned")
+                continue
+
+            if spore.biomass >= BIOMASS_DEFFENDER:
+                role = DEFENDER
+
+            elif spore.biomass >= BIOMASS_ATTACKER:
+                role = ATTACKER
+
+            # else spore.biomass >= BIOMASS_SCOUT:
+            else:
+                role = SCOUT
+
+            # else:
+            #     role = GENERATOR
+
+            self.Spore_roles[role].append(spore)
+            print(
+                f"[ASSIGN] Spore {spore.id} "
+                f"(biomass={spore.biomass}) → {role}"
+            )
+
+        # 🔄 Refresh spore objects while keeping roles
+        self.refresh_spore_objects(my_team)
+
+    def refresh_spore_objects(self, my_team: TeamInfo):
+        new_spores_by_id = {spore.id: spore for spore in my_team.spores}
+
+        for role, spores in self.Spore_roles.items():
+            for i, old_spore in enumerate(spores):
+                new_spore = new_spores_by_id.get(old_spore.id)
+                if new_spore is not None:
+                    spores[i] = new_spore
+
+    # def is_spore_already_assigned(self, spore) -> bool:
+    #     return any(
+    #         spore in spores
+    #         for spores in self.Spore_roles.values()
+    #     )
+    
+    # def cleanup_missing_spores(self, my_team: TeamInfo):
+    #     current_spores = my_team.spores
+
+    #     for role, spores in self.Spore_roles.items():
+    #         kept_spores = []
+    #         for spore in spores:
+    #             if spore in current_spores:
+    #                 kept_spores.append(spore)
+    #             else:
+    #                 print(
+    #                     f"[REMOVE] Spore {spore.id} "
+    #                     f"removed from role {role}"
+    #                 )
+
+    #         self.Spore_roles[role] = kept_spores
+    
+    def is_spore_already_assigned(self, spore) -> bool:
+        spore_id = spore.id
+
+        return any(
+            any(s.id == spore_id for s in spores)
+            for spores in self.Spore_roles.values()
+        )
+    
+    def cleanup_missing_spores(self, my_team: TeamInfo):
+        current_ids = {spore.id for spore in my_team.spores}
+
+        for role, spores in self.Spore_roles.items():
+            for spore in spores[:]:   # iterate over a copy
+                if spore.id not in current_ids:
+                    print(
+                        f"[REMOVE] Spore {spore.id} "
+                        f"removed from role {role}"
+                    )
+                    spores.remove(spore)
+               
+    def nutrient_per_turn(self) -> int:
+        us = self.state.yourTeamId
+        nutrients = self.state.world.map.nutrientGrid
+        total_nutrients = 0
+
+        for i in range(self.state.world.map.width):
+            for j in range(self.state.world.map.height):
+                if self.state.world.ownershipGrid[i][j] == us:
+                    total_nutrients += nutrients[i][j]
+
+        return total_nutrients
+    
